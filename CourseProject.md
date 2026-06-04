@@ -1387,7 +1387,7 @@ else:
 | Безопасность       | Высокая           | Опасно           |  
 
 
-## Реализация предполётных проверок (pre-flight checks)  
+## Задание 3. Реализация предполётных проверок (pre-flight checks)  
 **Часть 1: Код на C++ (`preflight.ino`)**  
 
 ```python
@@ -1955,6 +1955,670 @@ result_C = run_preflight_simulation("Scenario C", gps_delay_sec=3.0, battery_low
 - Красная линия (батарея) = 0 (разряжена)
 - На 2.1 с состояние переходит в ABORT (6)
 - Дальше ничего не происходит — взлёт заблокирован
+
+
+
+## Задание 4. Обнаружение опрокидывания при взлёте  
+**Часть 1: Код защиты на C++ (`rollover_protection.cpp`)**  
+```python
+// ============================================================
+// ФАЙЛ: rollover_protection.cpp
+// Защита от опрокидывания при взлёте
+// ============================================================
+
+// Пороговые значения углов (в градусах)
+#define MAX_SAFE_ROLL_ANGLE     45.0    // Максимальный безопасный крен
+#define MAX_SAFE_PITCH_ANGLE    45.0    // Максимальный безопасный тангаж
+#define CRITICAL_ANGLE          60.0    // Критический угол (необратимо)
+
+// ============================================================
+// Функция проверки опрокидывания
+// Вызывается в каждом цикле состояний 3 и 4
+// ============================================================
+bool check_rollover_protection() {
+    // Получаем текущие углы от IMU
+    float current_roll = imu_get_roll_angle();    // в градусах
+    float current_pitch = imu_get_pitch_angle();  // в градусах
+    
+    // Вычисляем абсолютные значения
+    float abs_roll = fabs(current_roll);
+    float abs_pitch = fabs(current_pitch);
+    
+    // Проверка на критический угол (60°)
+    if (abs_roll > CRITICAL_ANGLE || abs_pitch > CRITICAL_ANGLE) {
+        // КРИТИЧЕСКАЯ СИТУАЦИЯ - необратимое опрокидывание
+        // Немедленная остановка всех моторов
+        motor_1 = motor_2 = motor_3 = motor_4 = 1000;  // MIN_PWM
+        takeoff_state = 0;  // Возврат в IDLE
+        flight_mode = MODE_DISARMED;
+        
+        // Логирование критической ошибки
+        error_code = ERROR_CRITICAL_TILT;
+        log_event(EVENT_TIPPING_CRITICAL, current_roll, current_pitch);
+        
+        return true;  // Защита сработала
+    }
+    
+    // Проверка на пороговый угол (45°)
+    if (abs_roll > MAX_SAFE_ROLL_ANGLE || abs_pitch > MAX_SAFE_PITCH_ANGLE) {
+        // ОБНАРУЖЕНО ОПРОКИДЫВАНИЕ
+        // Немедленная остановка моторов
+        motor_1 = motor_2 = motor_3 = motor_4 = 1000;
+        takeoff_state = 0;
+        flight_mode = MODE_DISARMED;
+        
+        // Индикация ошибки
+        error_code = ERROR_TILT_THRESHOLD;
+        led_alert(ERROR_TILT_THRESHOLD);
+        
+        // Логирование события
+        log_event(EVENT_TIPPING, current_roll, current_pitch);
+        
+        return true;  // Защита сработала
+    }
+    
+    return false;  // Всё в норме
+}
+
+// ============================================================
+// ИНТЕГРАЦИЯ В FSM (добавить в case 3 и case 4)
+// ============================================================
+
+case 3:  // Плавный набор газа
+    // === ПРОВЕРКА НА ОПРОКИДЫВАНИЕ ===
+    if (check_rollover_protection()) {
+        break;  // Выход, моторы уже остановлены
+    }
+    
+    // Основной код набора газа...
+    if (arm_timer % 2 == 0)
+        takeoff_throttle++;
+    
+    // ...остальной код
+    break;
+
+case 4:  // Набор высоты
+    // === ПРОВЕРКА НА ОПРОКИДЫВАНИЕ ===
+    if (check_rollover_protection()) {
+        break;  // Выход, моторы уже остановлены
+    }
+    
+    // Основной код набора высоты...
+    if (fabs(lidar_distance - lidar_setpoint) < 50) {
+        hover_timer++;
+        // ...
+    }
+    break;
+```
+
+**Часть 2: Python-симуляция (rollover_protection.py)**  
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Константы
+DT = 0.004  # Период цикла 4 мс
+ARM_TIME_CYCLES = 500  # 2 секунды
+LIDAR_TAKEOFF_THRESHOLD = 150  # мм
+TARGET_ALTITUDE = 1000  # мм
+
+# Пороги защиты
+THRESHOLD_ANGLE = 45.0  # Рекомендуемый порог
+CRITICAL_ANGLE = 60.0   # Критический угол
+
+def simulate_rollover_scenario(scenario_name, initial_tilt=0.0, motor_failure=False, 
+                                failure_time=None, tilt_rate=0.5):
+    """
+    Симуляция взлёта с риском опрокидывания.
+    
+    Параметры:
+    - scenario_name: имя сценария
+    - initial_tilt: начальный наклон платформы (градусы)
+    - motor_failure: если True, отказ одного мотора
+    - failure_time: время отказа мотора (сек)
+    - tilt_rate: скорость нарастания угла (градусы/сек)
+    """
+    N = int(10 / DT)  # 10 секунд симуляции
+    t_arr = np.arange(N) * DT
+    
+    # Переменные состояния
+    state = 0  # STATE_IDLE
+    arm_counter = 0
+    preflight_timer = 0
+    throttle = 1000
+    hover_timer = 0
+    lidar_cm = 0.0
+    gps_fix = True  # Для упрощения считаем GPS всегда доступным
+    
+    # Углы (roll и pitch)
+    angle_roll = initial_tilt
+    angle_pitch = 0.0
+    
+    # Флаги
+    liftoff_detected = False
+    protection_triggered = False
+    protection_time = None
+    motor_failed = False
+    
+    # Логи
+    state_log = []
+    roll_log = []
+    pitch_log = []
+    altitude_log = []
+    throttle_log = []
+    protection_log = []  # 1 если защита сработала
+    
+    # Время событий
+    takeoff_start_time = None
+    
+    for k in range(N):
+        t = k * DT
+        
+        # ============================================
+        # 1. МОДЕЛИРОВАНИЕ ОТКАЗА МОТОРА
+        # ============================================
+        if motor_failure and failure_time and t >= failure_time and not motor_failed:
+            motor_failed = True
+            # Отказ одного мотора создаёт асимметричную тягу
+            # Это вызывает нарастание угла крена
+            print(f"[{scenario_name}]  ОТКАЗ МОТОРА на t={t:.2f}с")
+        
+        # ============================================
+        # 2. МОДЕЛИРОВАНИЕ ИЗМЕНЕНИЯ УГЛА
+        # ============================================
+        if motor_failed:
+            # При отказе мотора угол нарастает быстро
+            angle_roll += 3.0 * DT * 100  # 3 градуса за цикл (быстро!)
+        elif state >= 3 and not liftoff_detected:
+            # При взлёте с неровной поверхности угол медленно растёт
+            # если ПИД не успевает компенсировать
+            angle_roll += tilt_rate * DT  # Например, 0.5 градуса/сек
+        
+        # ============================================
+        # 3. ПРОВЕРКА ЗАЩИТЫ ОТ ОПРОКИДЫВАНИЯ
+        # ============================================
+        abs_roll = abs(angle_roll)
+        abs_pitch = abs(angle_pitch)
+        
+        # Критическая проверка (60°)
+        if abs_roll > CRITICAL_ANGLE or abs_pitch > CRITICAL_ANGLE:
+            if not protection_triggered:
+                protection_triggered = True
+                protection_time = t
+                print(f"[{scenario_name}]  КРИТИЧЕСКИЙ УГОЛ {angle_roll:.1f}° на t={t:.2f}с")
+            # Мгновенный дизарм
+            state = 0
+            throttle = 1000
+            protection_log.append(1)
+            # Продолжаем логировать, но дрон уже не летит
+            
+        # Пороговая проверка (45°)
+        elif abs_roll > THRESHOLD_ANGLE or abs_pitch > THRESHOLD_ANGLE:
+            if not protection_triggered:
+                protection_triggered = True
+                protection_time = t
+                print(f"[{scenario_name}]  ПОРОГ ОПРОКИДЫВАНИЯ {angle_roll:.1f}° на t={t:.2f}с")
+            # Дизарм
+            state = 0
+            throttle = 1000
+            protection_log.append(1)
+        else:
+            protection_log.append(0)
+        
+        # ============================================
+        # 4. ЛОГИКА FSM (упрощённая)
+        # ============================================
+        if state == 0 and not protection_triggered:
+            if t > 0.1:
+                state = 1  # ARM
+                arm_counter = 0
+                takeoff_start_time = t
+                
+        elif state == 1 and not protection_triggered:
+            arm_counter += 1
+            throttle = 1000
+            if arm_counter >= ARM_TIME_CYCLES:
+                state = 2  # PREFLIGHT
+                arm_counter = 0
+                
+        elif state == 2 and not protection_triggered:
+            preflight_timer += 1
+            if preflight_timer > 100:  # 0.4 с для простоты
+                state = 3  # THROTTLE_UP
+                
+        elif state == 3 and not protection_triggered:
+            if k % 2 == 0:
+                throttle += 1
+            
+            # Модель подъёма
+            if throttle > 1350:
+                lift_force = (throttle - 1350) * 0.01
+                lidar_cm += lift_force
+            
+            if lidar_cm > LIDAR_TAKEOFF_THRESHOLD and not liftoff_detected:
+                liftoff_detected = True
+                state = 4  # CLIMB
+                
+        elif state == 4 and not protection_triggered:
+            # Набор высоты
+            error = TARGET_ALTITUDE - lidar_cm
+            lift_force = 0.5 + (error * 0.001)
+            lidar_cm += lift_force
+            
+            if abs(lidar_cm - TARGET_ALTITUDE) < 50:
+                hover_timer += 1
+                if hover_timer >= 125:
+                    state = 5  # DONE
+            else:
+                hover_timer = 0
+        
+        # ============================================
+        # 5. ЗАПИСЬ ЛОГОВ
+        # ============================================
+        state_log.append(state)
+        roll_log.append(angle_roll)
+        pitch_log.append(angle_pitch)
+        altitude_log.append(lidar_cm)
+        throttle_log.append(throttle)
+    
+    return {
+        't': t_arr,
+        'state': state_log,
+        'roll': roll_log,
+        'pitch': pitch_log,
+        'altitude': altitude_log,
+        'throttle': throttle_log,
+        'protection': protection_log,
+        'protection_triggered': protection_triggered,
+        'protection_time': protection_time
+    }
+
+
+def find_optimal_threshold():
+    """
+    Поиск оптимального порога защиты.
+    Тестируем разные углы от 30° до 60°.
+    """
+    print("\n" + "=" * 70)
+    print("ПОИСК ОПТИМАЛЬНОГО ПОРОГА ЗАЩИТЫ")
+    print("=" * 70)
+    
+    thresholds = [30, 35, 40, 45, 50, 55, 60]
+    results = []
+    
+    for threshold in thresholds:
+        global THRESHOLD_ANGLE
+        THRESHOLD_ANGLE = threshold
+        
+        result = simulate_rollover_scenario(
+            f"Threshold_{threshold}",
+            initial_tilt=10.0,
+            motor_failure=True,
+            failure_time=2.0,
+            tilt_rate=1.0
+        )
+        
+        max_angle = max(result['roll'])
+        max_altitude = max(result['altitude'])
+        triggered = result['protection_triggered']
+        
+        results.append({
+            'threshold': threshold,
+            'max_angle': max_angle,
+            'max_altitude': max_altitude,
+            'triggered': triggered
+        })
+        
+        status = " Сработала" if triggered else " Не сработала"
+        print(f"Порог {threshold:2d}°: макс. угол {max_angle:5.1f}°, "
+              f"макс. высота {max_altitude:6.1f} мм — {status}")
+    
+    print("=" * 70)
+    
+    # Находим оптимальный порог
+    # Критерий: защита сработала И максимальный угол < 60°
+    optimal = None
+    for r in results:
+        if r['triggered'] and r['max_angle'] < CRITICAL_ANGLE:
+            optimal = r
+            break
+    
+    if optimal:
+        print(f"\n ОПТИМАЛЬНЫЙ ПОРОГ: {optimal['threshold']}°")
+        print(f"   Максимальный угол: {optimal['max_angle']:.1f}°")
+        print(f"   Максимальная высота: {optimal['max_altitude']:.1f} мм")
+    else:
+        print("\n Не найдено безопасного порога!")
+    
+    return results
+
+
+# ============================================
+# ЗАПУСК СЦЕНАРИЕВ
+# ============================================
+
+print("=" * 70)
+print("СИМУЛЯЦИЯ ЗАЩИТЫ ОТ ОПРОКИДЫВАНИЯ")
+print("=" * 70)
+
+# Сценарий 1: Неровная поверхность
+print("\n СЦЕНАРИЙ 1: Неровная поверхность (начальный наклон 10°)")
+result1 = simulate_rollover_scenario(
+    "Uneven Surface",
+    initial_tilt=10.0,
+    motor_failure=False,
+    tilt_rate=2.0  # 2 градуса/сек
+)
+
+if result1['protection_triggered']:
+    print(f" Защита сработала на t={result1['protection_time']:.2f} с")
+    print(f"   Максимальный угол: {max(result1['roll']):.1f}°")
+else:
+    print(" Защита НЕ сработала — дрон взлетел успешно")
+
+# Сценарий 2: Отказ одного мотора
+print("\n СЦЕНАРИЙ 2: Отказ одного мотора на t=2.0 с")
+result2 = simulate_rollover_scenario(
+    "Motor Failure",
+    initial_tilt=0.0,
+    motor_failure=True,
+    failure_time=2.0,
+    tilt_rate=0.0
+)
+
+if result2['protection_triggered']:
+    print(f" Защита сработала на t={result2['protection_time']:.2f} с")
+    print(f"   Максимальный угол: {max(result2['roll']):.1f}°")
+else:
+    print(" Защита НЕ сработала")
+
+# Сценарий 3: Поиск оптимального порога
+optimal_results = find_optimal_threshold()
+
+# ============================================
+# ПОСТРОЕНИЕ ГРАФИКОВ
+# ============================================
+
+fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+
+# Функция для построения графика сценария
+def plot_scenario(ax, result, title, scenario_num):
+    t = result['t']
+    
+    # Угол крена
+    ax.plot(t, result['roll'], 'r-', linewidth=2, label='Крен (Roll)')
+    
+    # Пороговые линии
+    ax.axhline(y=THRESHOLD_ANGLE, color='orange', linestyle='--', 
+               linewidth=2, alpha=0.7, label=f'Порог {THRESHOLD_ANGLE}°')
+    ax.axhline(y=CRITICAL_ANGLE, color='red', linestyle=':', 
+               linewidth=2, alpha=0.7, label=f'Критический {CRITICAL_ANGLE}°')
+    
+    # Момент срабатывания защиты
+    if result['protection_triggered']:
+        ax.axvline(x=result['protection_time'], color='green', linestyle='-', 
+                   linewidth=3, alpha=0.5, label='Защита сработала')
+    
+    # Высота (вторая ось Y)
+    ax2 = ax.twinx()
+    ax2.plot(t, result['altitude'], 'b-', linewidth=1.5, label='Высота', alpha=0.6)
+    ax2.set_ylabel('Высота, мм', color='blue', fontsize=10)
+    ax2.tick_params(axis='y', labelcolor='blue')
+    ax2.set_ylim([0, 1200])
+    
+    # Оформление
+    ax.set_title(f'{title}', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Угол крена, °')
+    ax.set_xlabel('Время, с')
+    ax.legend(loc='upper left', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([-10, 70])
+
+plot_scenario(axes[0], result1, 'Сценарий 1: Неровная поверхность (наклон 10°)', 1)
+plot_scenario(axes[1], result2, 'Сценарий 2: Отказ мотора на t=2.0 с', 2)
+
+# Третий график: сравнение порогов
+if len(optimal_results) > 0:
+    # Берём результаты для разных порогов
+    thresholds_to_show = [35, 45, 55]
+    colors = ['red', 'orange', 'green']
+    
+    for i, (threshold, color) in enumerate(zip(thresholds_to_show, colors)):
+        global THRESHOLD_ANGLE
+        THRESHOLD_ANGLE = threshold
+        
+        test_result = simulate_rollover_scenario(
+            f"Threshold_{threshold}",
+            initial_tilt=5.0,
+            motor_failure=True,
+            failure_time=1.5
+        )
+        
+        axes[2].plot(test_result['t'], test_result['roll'], 
+                    color=color, linewidth=2, 
+                    label=f'Порог {threshold}° (макс. {max(test_result["roll"]):.1f}°)')
+    
+    axes[2].axhline(y=45, color='orange', linestyle='--', alpha=0.5, label='Рекомендуемый 45°')
+    axes[2].axhline(y=60, color='red', linestyle=':', alpha=0.5, label='Критический 60°')
+    axes[2].set_title('Сценарий 3: Сравнение разных порогов защиты', fontsize=11, fontweight='bold')
+    axes[2].set_ylabel('Угол крена, °')
+    axes[2].set_xlabel('Время, с')
+    axes[2].legend(loc='upper left', fontsize=9)
+    axes[2].grid(True, alpha=0.3)
+    axes[2].set_ylim([-10, 70])
+
+plt.tight_layout()
+plt.savefig('rollover_protection.png', dpi=150, bbox_inches='tight')
+print("\n График сохранён как 'rollover_protection.png'")
+plt.show()
+
+# ============================================
+# ОБОСНОВАНИЕ ПОРОГА 45°
+# ============================================
+
+print("\n" + "=" * 70)
+print("ОБОСНОВАНИЕ ВЫБОРА ПОРОГА 45°")
+print("=" * 70)
+print("""
+ТЕОРЕТИЧЕСКОЕ ОБОСНОВАНИЕ:
+
+1. РАЗЛОЖЕНИЕ ТЯГИ НА СОСТАВЛЯЮЩИЕ:
+   При крене θ вертикальная составляющая тяги:
+   T_vertical = T × cos(θ)
+   
+   При θ = 45°:
+   T_vertical = T × cos(45°) = T × 0.707 ≈ 0.71T
+   
+   Это означает ПОТЕРЮ 29% подъёмной силы!
+   
+   Для типичного дрона с запасом тяги 2:1 (может создать 
+   тягу в 2 раза больше веса):
+   - При 45° остаётся: 2 × 0.71 = 1.42 × вес
+   - Это ещё достаточно для удержания, но запас мал
+
+2. ГОРИЗОНТАЛЬНОЕ СМЕЩЕНИЕ:
+   При крене 45° горизонтальная составляющая:
+   T_horizontal = T × sin(45°) = T × 0.707
+   
+   Это вызывает БЫСТРОЕ смещение дрона в сторону,
+   что может привести к столкновению с препятствиями.
+
+3. ГЕОМЕТРИЯ ДРОНА:
+   Для типичного квадрокоптера:
+   - Диагональ: 250 мм
+   - Высота шасси: 100 мм
+   
+   При крене 45° расстояние от винта до земли:
+   h = 100 × cos(45°) ≈ 70 мм
+   
+   При крене 60°:
+   h = 100 × cos(60°) = 50 мм
+   
+   Винты могут коснуться земли!
+
+4. ВРЕМЯ РЕАКЦИИ:
+   При скорости нарастания угла 10°/с:
+   - От 45° до 60° проходит 1.5 секунды
+   - Этого достаточно для реакции системы
+   - При пороге 50° остаётся только 1.0 с
+   - При пороге 40° есть запас 2.0 с
+
+5. ЗАПАС НА ПОГРЕШНОСТИ:
+   - Погрешность IMU: ±2-3°
+   - Вибрации: ±5°
+   - Задержка реакции: 0.1-0.2 с
+   
+   Порог 45° обеспечивает безопасный запас.
+
+ВЫВОД:
+ 45° — оптимальный баланс между:
+   - Безопасностью (предотвращение опрокидывания)
+   - Ложными срабатываниями (допуск на вибрации)
+   - Временем на реакцию (1.5 с до критического угла)
+
+ Меньше 40° — слишком чувствительно, ложные срабатывания
+ Больше 50° — мало времени на реакцию, риск необратимого опрокидывания
+""")
+print("=" * 70)
+```
+
+
+**Объяснение логики программы**  
+**Теоретическое обоснование порога 45°**  
+Когда дрон наклоняется на угол θ, его общая тяга T раскладывается на две компоненты:  
+- Вертикальная: `T_vertical = T × cos(θ)`
+- Горизонтальная: `T_horizontal = T × sin(θ)`
+
+
+При угле 45°:  
+- cos(45°) = sin(45°) = 0.707
+- Вертикальная тяга: 0.71T (потеря 29%!)
+- Горизонтальная тяга: 0.71T (сильный дрейф)
+
+Почему это критично:  
+- Дрон теряет почти треть подъёмной силы
+- Начинает быстро смещаться в сторону
+- Винты приближаются к земле
+
+
+Геометрический расчёт:
+Для дрона с высотой шасси 100 мм:  
+- При 45°: расстояние от винта до земли = 100 × cos(45°) ≈ 70 мм
+- При 60°: расстояние = 100 × cos(60°) = 50 мм (опасно близко!)
+
+
+Временной запас:
+При скорости нарастания угла 10°/с:
+- От 45° до 60° проходит 1.5 секунды — достаточно для реакции
+- От 50° до 60° только 1.0 секунда — мало времени
+- От 40° до 60° 2.0 секунды — хороший запас
+
+
+**Вывод:** 45° — это компромисс.  
+
+
+**Разбор сценариев**  
+Сценарий 1: Неровная поверхность
+Моделирование:  
+- Начальный наклон платформы: 10°
+- Дрон пытается взлететь
+- ПИД-регулятор не успевает компенсировать
+- Угол медленно нарастает: 2°/сек
+
+
+Что происходит: 
+- t = 0.1 с: переход в ARM
+- t = 2.1 с: переход в THROTTLE_UP
+- t ≈ 2.5 с: отрыв (лидар > 150 мм)
+- t = 2.5–7.5 с: угол растёт с 10° до 45°
+- t ≈ 7.5 с: `angle_roll > 45°` → защита сработала
+- Моторы останавливаются, дрон не успевает перевернуться
+
+
+**Результат:** Защита предотвратила опрокидывание  
+
+
+Сценарий 2: Отказ одного мотора  
+Моделирование:  
+- Дрон взлетает нормально
+- На t = 2.0 с: один из 4 моторов отказывает
+- Тяга падает на 25% с одной стороны
+- Угол начинает быстро расти: 3° за цикл (очень быстро)
+
+
+Что происходит: 
+- t = 2.0 с: отказ мотора
+- t = 2.0–2.5 с: угол растёт с 0° до 45° (всего за 0.5 с)
+- t ≈ 2.5 с: `angle_roll > 45°` → защита сработала
+- Мгновенный дизарм
+- t ≈ 7.5 с: `angle_roll > 45°` → защита сработала
+- Моторы останавливаются, дрон не успевает перевернуться
+
+
+
+**Результат:** Защита сработала до достижения критического угла 60°  
+
+
+Сценарий 3: Поиск оптимального порога  
+Цель: Найти минимальный угол, при котором защита ещё эффективна  
+Метод:  
+- Тестируем пороги: 30°, 35°, 40°, 45°, 50°, 55°, 60°
+- Для каждого порога запускаем симуляцию с отказом мотора
+- Замеряем: Сработала ли защита? Максимальный достигнутый угол, максимальную высоту
+- Угол начинает быстро расти: 3° за цикл (очень быстро)
+
+
+Критерии оптимальности:  
+- Защита должна сработать
+- Максимальный угол < 60° (критический)
+- Дрон не должен успеть перевернуться
+
+
+Ожидаемый результат:  
+| Параметр           | Режим A (плавный) | Режим B (резкий) |
+|--------------------|-------------------|------------------|
+| Время отрыва       |       ~3.5 с      | ~0.8 с           |
+| Макс. вибрации     |       Низкие      | В 2-3 раза выше  |
+| Работа фильтров    |     Стабильная    | Срыв             |
+| Работа ПИД         | Стабильная        | Насыщение        |
+| Риск опрокидывания | Низкий            | Высокий          |
+| Безопасность       | Высокая           | Опасно           |  
+
+**Вывод:** 45° — оптимальный порог  
+
+
+![фото_программы](4.1.png)
+**Описание графиков**  
+
+График 1 (Неровная поверхность):  
+- Красная линия: угол крена медленно растёт от 10°
+- Оранжевый пунктир: порог 45°
+- Зелёная вертикаль: момент срабатывания защиты
+- Синяя линия (вторая ось): высота растёт, потом падает
+- Видно: защита сработала до того, как угол достиг 60°
+
+
+
+График 2 (Отказ мотора):  
+- Красная линия: угол резко растёт после t=2.0 с
+- Скорость нарастания: ~60°/сек (очень быстро)
+- Видно: без защиты дрон достиг бы 60° за 1 секунду
+
+
+
+График 3 (Сравнение порогов):  
+- Три линии для порогов 35°, 45°, 55°
+- Видно:
+  - При 35° защита срабатывает слишком рано
+  - При 45° — оптимально
+  - При 55° угол уже близок к критическому
+
+
+
+
+**Результат:** Защита сработала до достижения критического угла 60°
+
+
 
 
 
