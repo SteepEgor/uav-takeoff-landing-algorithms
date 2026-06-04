@@ -713,18 +713,18 @@ import matplotlib.pyplot as plt
 
 # Константы из C-кода
 DT = 0.004  # Период цикла 4 мс
-ARM_TIME_CYCLES = 500  # 2 секунды
-HOVER_TIME_CYCLES = 125  # 0.5 секунды (в оригинале 100, но у вас 125)
-LIDAR_TAKEOFF_THRESHOLD = 150  # мм
-TARGET_ALTITUDE = 1000  # мм (1 метр)
+ARM_TIME_CYCLES = 500  # 2 секунды Количество циклов для арминга 
+HOVER_TIME_CYCLES = 125  # 0.5 секунды Циклы стабилизации
+LIDAR_TAKEOFF_THRESHOLD = 150  # мм Порог отрыва от земли
+TARGET_ALTITUDE = 1000  # мм (1 метр) Целевая высота взлёта
 
 # Состояния
-STATE_IDLE = 0
-STATE_ARM = 1
-STATE_WAIT_GPS = 2
-STATE_THROTTLE_UP = 3
-STATE_CLIMB = 4
-STATE_DONE = 5
+STATE_IDLE = 0 # Ждём команду пилота
+STATE_ARM = 1 # Инициализация ESC (2 с)
+STATE_WAIT_GPS = 2 # Ждём фикс спутников
+STATE_THROTTLE_UP = 3 # Плавное увеличение тяги
+STATE_CLIMB = 4 # Полёт до 1000 мм
+STATE_DONE = 5 # Взлёт окончен
 
 def run_simulation(scenario_name, gps_delay_sec, wind_event=None):
     """
@@ -736,7 +736,7 @@ def run_simulation(scenario_name, gps_delay_sec, wind_event=None):
     - wind_event: словарь {'time': sec, 'drop_mm': mm} или None
     """
     N = int(30 / DT)  # Симуляция на 30 секунд
-    t_arr = np.arange(N) * DT
+    t_arr = np.arange(N) * DT # t_arr — массив времени для каждого цикла
     
     # Переменные состояния
     state = STATE_IDLE
@@ -944,9 +944,16 @@ if t > 3.0:  # Через 3 секунды
 - На t = 2.1 с → завершение ARM (прошло 2 секунды)
 - На t = 3.0 с → приходит GPS
 - На t = 3.0 с → переход в THROTTLE_UP
-- На t ≈ 5.8 с → отрыв (лидар > 150 мм)
-- На t ≈ 7.5 с → стабилизация на 1000 мм
-- Итого: ~7.5 секунд
+- На t ≈ 5.8 с → отрыв (лидар > 150 мм, газ достиг ~1350 мкс)
+- На t ≈ 11.37 с → стабилизация на 1000 мм (±50 мм в течение 0.5 с)
+- Итого: ~11.37 секунд
+
+
+Детализация фазы CLIMB (5.8–11.37 с):  
+- Время набора высоты: ~5.57 с
+- Высота подъёма: с 150 мм до 1000 мм = 850 мм
+- Средняя скорость подъёма: 850 / 5.57 ≈ 153 мм/с
+- Включая стабилизацию: 0.5 с
 
 
 **Сценарий 2: Задержка GPS (15 с): **  
@@ -963,8 +970,8 @@ if t > 15.0:  # Через 15 секунд
   - Счётчик `arm_counter` растёт (таймаут 60 с)
 - На t = 15.0 с → приходит GPS
 - На t = 15.0 с → переход в THROTTLE_UP
-- Далее как в сценарии 1...
-- Итого: 15 + 5.5 = ~20.5 секунд
+- t ≈ 17.8 с → отрыв
+- Итого: t ≈ 23.37 с → стабилизация на 1000 мм
 
 
 **Сценарий 3: Ветер на t=5 с (падение -20 см)**  
@@ -993,15 +1000,16 @@ else:
     hover_timer = 0  # СБРОС таймера!
 ```
 Что происходит:
-- Ветер сдувает дрон → высота становится 200 мм вместо 400 мм
-- Разница с целью: |200 - 1000| = 800 мм (больше 50 мм!)
+- Ветер сдувает дрон → высота становится 200-300 мм вместо 400-500 мм
+- Разница с целью: |250 - 1000| = 750 мм (больше 50 мм!)
 - Условие стабилизации НЕ выполняется
 - `hover_timer` сбрасывается в 0
 - Дрон остаётся в состоянии CLIMB
-- Продолжает набирать высоту с газом > 1000
+- Должен снова подняться с ~250 мм до 1000 мм = 750 мм
 - Только когда снова достигнет 1000 ± 50 мм и простоит 0.5 с → переход в DONE
 
-Итого: ~9.0 секунд (на ~1.5 с дольше нормы)  
+Итого: 15.38 секунд  
+
 **Расчёт времени взлёта**  
 Как считается:  
 ```python
@@ -1021,9 +1029,9 @@ if hover_timer >= 125:
 total_time = takeoff_end_time - takeoff_start_time
 ```
 Результаты:
-- Сценарий 1: ~7.5 с (норма)
-- Сценарий 2: ~20.5 с (+13 с задержка GPS)
-- Сценарий 3: ~9.0 с (+1.5 с на восстановление после ветра)
+- Сценарий 1 (Норма): 11.37 с
+- Сценарий 2 (Задержка GPS): 23.37 с (+12.00 с)
+- Сценарий 3 (Ветер): 15.38 с (+4.01 с)
 
 **Визуализация на графиках:**  
 
@@ -1059,13 +1067,13 @@ def simulate_smooth_start():
     """Режим A: Плавное нарастание газа (125 ед./с)"""
     throttle = 1000
     lidar_mm = 0.0
-    liftoff_detected = False
-    liftoff_time = None
+    liftoff_detected = False # Флаг отрыва
+    liftoff_time = # Время отрыва
     
     throttle_log = []
     altitude_log = []
-    vibration_log = []
-    vibration_filtered = []  # После фильтра низких частот
+    vibration_log = [] 
+    vibration_filtered = []  # вибрации после фильтра
     
     for k in range(N):
         t = k * dt
@@ -1083,7 +1091,7 @@ def simulate_smooth_start():
         # Вибрации: пропорциональны газу + случайная составляющая
         # В реальности при резком изменении газа вибрации выше
         base_vib = (throttle - 1000) * 0.05
-        noise = 0.3 * np.random.randn() * base_vib
+        noise = 0.3 * np.random.randn() * base_vib # Случайный шум ±30% от базовых вибраций
         vib = base_vib * (1 + noise/10) if base_vib > 0 else 0
         
         # Имитация фильтра низких частот (скользящее среднее)
@@ -1139,7 +1147,7 @@ def simulate_sharp_start():
             # Ударная нагрузка: вибрации в 2-3 раза выше
             base_vib = (throttle - 1000) * 0.15  # x3 от плавного
         else:
-            base_vib = (throttle - 1000) * 0.05
+            base_vib = (throttle - 1000) * 0.05 # Резкое изменение газа вызывает ударную нагрузку, инерция двигателей
         
         noise = 0.5 * np.random.randn() * base_vib  # больше шума
         vib = base_vib * (1 + noise/10) if base_vib > 0 else 0
@@ -1376,11 +1384,577 @@ else:
 | Работа фильтров    |     Стабильная    | Срыв             |
 | Работа ПИД         | Стабильная        | Насыщение        |
 | Риск опрокидывания | Низкий            | Высокий          |
-| Безопасность       | Высокая           | Опасно           |
+| Безопасность       | Высокая           | Опасно           |  
+
+
+## Реализация предполётных проверок (pre-flight checks)  
+**Часть 1: Код на C++ (`preflight.ino`)**  
+
+```python
+// ============================================================
+// ФАЙЛ: preflight.ino
+// Предполётные проверки (pre-flight checks)
+// ============================================================
+
+// Структура для хранения результатов всех проверок
+struct PreflightStatus {
+    bool imu_ok;       // IMU откалиброван (дрон стоит ровно)
+    bool gps_fix;      // GPS-фикс получен (3D fix)
+    bool battery_ok;   // Батарея заряжена (> 10.5 В для 3S)
+    bool lidar_ok;     // Лидар отвечает (нет ошибки 0xFFFF)
+    bool all_ok;       // Все проверки пройдены
+};
+
+// ============================================================
+// Функция выполнения всех предполётных проверок
+// ============================================================
+PreflightStatus run_preflight_checks() {
+    PreflightStatus s;
+    
+    // Проверка 1: IMU откалиброван
+    // Дрон должен стоять горизонтально (крен и тангаж < 5°)
+    s.imu_ok = (abs(angle_roll) < 5.0 && abs(angle_pitch) < 5.0);
+    
+    // Проверка 2: GPS-фикс получен
+    // gps_fix_type: 0 = нет фикса, 2 = 2D, 3 = 3D fix
+    s.gps_fix = (gps_fix_type >= 3);
+    
+    // Проверка 3: Батарея не разряжена
+    // battery_voltage хранится в единицах 0.01 В × 100
+    // 10.5 В = 1050 единиц (минимум для 3S LiPo)
+    s.battery_ok = (battery_voltage > 1050);
+    
+    // Проверка 4: Лидар отвечает
+    // 0xFFFF = ошибка датчика, 0 = нет данных
+    s.lidar_ok = (lidar_distance != 0xFFFF && lidar_distance > 0);
+    
+    // Итоговая проверка: все должны быть true
+    s.all_ok = s.imu_ok && s.gps_fix && s.battery_ok && s.lidar_ok;
+    
+    return s;
+}
+
+// ============================================================
+// Функция индикации ошибок через мигание LED
+// ============================================================
+void blink_error_code(int code) {
+    // code: 1=IMU, 2=GPS, 3=батарея, 4=лидар
+    for (int i = 0; i < code; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(200);
+        digitalWrite(LED_PIN, LOW);
+        delay(200);
+    }
+    delay(500);  // Пауза между кодами
+}
+
+// ============================================================
+// ИНТЕГРАЦИЯ В FSM (замена case 2)
+// ============================================================
+case 2:  // STATE_PREFLIGHT (бывший STATE_WAIT_GPS)
+{
+    // Выполняем все предполётные проверки
+    PreflightStatus pf = run_preflight_checks();
+    
+    // Если все проверки пройдены → переход к набору газа
+    if (pf.all_ok) {
+        // Фиксируем домашнюю точку
+        home_latitude = gps_latitude;
+        home_longitude = gps_longitude;
+        home_altitude = actual_altitude;
+        takeoff_state = 3;  // Переход к THROTTLE_UP
+        preflight_timer = 0;
+    }
+    else {
+        // Индикация ошибки через LED
+        if (!pf.imu_ok)           blink_error_code(1);  // 1 мигание = IMU
+        else if (!pf.gps_fix)     blink_error_code(2);  // 2 мигания = GPS
+        else if (!pf.battery_ok)  blink_error_code(3);  // 3 мигания = батарея
+        else if (!pf.lidar_ok)    blink_error_code(4);  // 4 мигания = лидар
+        
+        // КРИТИЧЕСКАЯ ОШИБКА: батарея разряжена
+        // Взлёт запрещён, возвращаемся в состояние ожидания
+        if (!pf.battery_ok) {
+            takeoff_state = 0;  // Возврат в IDLE
+            disarm_motors();     // Дизарминг для безопасности
+            error_code = ERROR_BATTERY_LOW;
+        }
+    }
+    
+    // Таймаут: 60 секунд ожидания GPS
+    preflight_timer++;
+    if (preflight_timer > 15000) {  // 15000 × 4 мс = 60 с
+        if (pf.gps_fix) {
+            // GPS есть, но что-то другое не проходит
+            // Продолжаем ждать
+        } else {
+            // GPS не пришёл за 60 с
+            // Взлетаем без GPS (RTH будет недоступен)
+            takeoff_state = 3;
+            warning_code = WARNING_NO_GPS;
+        }
+    }
+    break;
+}
+```
+
+**Часть 2: Python-симуляция (`preflight_simulation.py`)**  
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Константы
+DT = 0.004  # Период цикла 4 мс
+ARM_TIME_CYCLES = 500  # 2 секунды
+LIDAR_TAKEOFF_THRESHOLD = 150  # мм
+TARGET_ALTITUDE = 1000  # мм
+
+# Состояния FSM
+STATE_IDLE = 0
+STATE_ARM = 1
+STATE_PREFLIGHT = 2  # Бывший STATE_WAIT_GPS
+STATE_THROTTLE_UP = 3
+STATE_CLIMB = 4
+STATE_DONE = 5
+STATE_ABORT = 6  # НОВОЕ: взлёт запрещён
+
+def run_preflight_simulation(scenario_name, gps_delay_sec, battery_low=False):
+    """
+    Симуляция предполётных проверок.
+    
+    Параметры:
+    - scenario_name: имя сценария
+    - gps_delay_sec: задержка GPS-фикса (сек)
+    - battery_low: если True, батарея разряжена
+    """
+    N = int(30 / DT)  # 30 секунд симуляции
+    t_arr = np.arange(N) * DT
+    
+    # Переменные состояния
+    state = STATE_IDLE
+    arm_counter = 0
+    preflight_timer = 0
+    throttle = 1000
+    hover_timer = 0
+    lidar_cm = 0.0
+    
+    # Состояние проверок (имитация датчиков)
+    imu_ok = True  # IMU всегда исправен в нашей симуляции
+    gps_fix = False
+    battery_ok = not battery_low  # Зависит от сценария
+    lidar_ok = True  # Лидар всегда исправен
+    
+    # Логи
+    state_log = []
+    imu_log = []
+    gps_log = []
+    battery_log = []
+    lidar_log = []
+    all_ok_log = []
+    
+    # Время событий
+    takeoff_start_time = None
+    takeoff_end_time = None
+    abort_time = None
+    
+    for k in range(N):
+        t = k * DT
+        
+        # ============================================
+        # 1. СОБЫТИЯ ОКРУЖАЮЩЕЙ СРЕДЫ
+        # ============================================
+        
+        # GPS фикс приходит через заданное время
+        if t > gps_delay_sec:
+            gps_fix = True
+        
+        # ============================================
+        # 2. ЛОГИКА FSM
+        # ============================================
+        
+        if state == STATE_IDLE:
+            if t > 0.1:  # Команда пилота
+                state = STATE_ARM
+                arm_counter = 0
+                takeoff_start_time = t
+                
+        elif state == STATE_ARM:
+            arm_counter += 1
+            throttle = 1000
+            
+            if arm_counter >= ARM_TIME_CYCLES:
+                state = STATE_PREFLIGHT
+                arm_counter = 0
+                preflight_timer = 0
+                
+        elif state == STATE_PREFLIGHT:
+            preflight_timer += 1
+            
+            # Выполняем предполётные проверки
+            all_ok = imu_ok and gps_fix and battery_ok and lidar_ok
+            
+            if all_ok:
+                # Все проверки пройдены → переход к взлёту
+                state = STATE_THROTTLE_UP
+                preflight_timer = 0
+            else:
+                # Проверка критической ошибки: батарея разряжена
+                if not battery_ok:
+                    state = STATE_ABORT
+                    abort_time = t
+                    print(f"[{scenario_name}] ⚠️ БАТАРЕЯ РАЗРЯЖЕНА! Взлёт запрещён на t={t:.2f}с")
+                
+                # Таймаут GPS: 60 секунд
+                elif preflight_timer > 15000 and not gps_fix:
+                    # Взлетаем без GPS (с предупреждением)
+                    state = STATE_THROTTLE_UP
+                    print(f"[{scenario_name}] ⚠️ GPS таймаут! Взлет без GPS.")
+                    
+        elif state == STATE_THROTTLE_UP:
+            if k % 2 == 0:
+                throttle += 1
+            
+            lift_force = (throttle - 1000) * 0.0005
+            lidar_cm += lift_force
+            
+            if lidar_cm > LIDAR_TAKEOFF_THRESHOLD:
+                state = STATE_CLIMB
+                hover_timer = 0
+                
+        elif state == STATE_CLIMB:
+            error = TARGET_ALTITUDE - lidar_cm
+            lift_force = 0.5 + (error * 0.001)
+            lidar_cm += lift_force
+            
+            if abs(lidar_cm - TARGET_ALTITUDE) < 50:
+                hover_timer += 1
+                if hover_timer >= 125:
+                    state = STATE_DONE
+                    takeoff_end_time = t
+            else:
+                hover_timer = 0
+                
+        elif state == STATE_DONE:
+            lidar_cm = TARGET_ALTITUDE
+            
+        elif state == STATE_ABORT:
+            # Взлёт запрещён, ничего не делаем
+            pass
+        
+        # ============================================
+        # 3. ЗАПИСЬ ЛОГОВ
+        # ============================================
+        state_log.append(state)
+        imu_log.append(1 if imu_ok else 0)
+        gps_log.append(1 if gps_fix else 0)
+        battery_log.append(1 if battery_ok else 0)
+        lidar_log.append(1 if lidar_ok else 0)
+        all_ok_log.append(1 if (imu_ok and gps_fix and battery_ok and lidar_ok) else 0)
+    
+    # Расчёт времени
+    if takeoff_start_time and takeoff_end_time:
+        total_time = takeoff_end_time - takeoff_start_time
+    else:
+        total_time = None
+    
+    return {
+        't': t_arr,
+        'state': state_log,
+        'imu': imu_log,
+        'gps': gps_log,
+        'battery': battery_log,
+        'lidar': lidar_log,
+        'all_ok': all_ok_log,
+        'total_time': total_time,
+        'abort_time': abort_time
+    }
+
+
+# ============================================
+# ЗАПУСК ТРЁХ СЦЕНАРИЕВ
+# ============================================
+
+print("=" * 70)
+print("СИМУЛЯЦИЯ ПРЕДПОЛЁТНЫХ ПРОВЕРОК")
+print("=" * 70)
+
+# Сценарий A: Всё исправно
+print("\n СЦЕНАРИЙ A: Все проверки пройдены сразу")
+result_A = run_preflight_simulation("Scenario A", gps_delay_sec=3.0, battery_low=False)
+if result_A['total_time']:
+    print(f" Взлёт разрешён. Полное время: {result_A['total_time']:.2f} с")
+else:
+    print(" Взлёт не завершён")
+
+# Сценарий B: GPS задерживается на 20 с
+print("\n СЦЕНАРИЙ B: GPS-фикс задерживается на 20 с")
+result_B = run_preflight_simulation("Scenario B", gps_delay_sec=20.0, battery_low=False)
+if result_B['total_time']:
+    print(f" Взлёт разрешён. Полное время: {result_B['total_time']:.2f} с")
+else:
+    print(" Взлёт не завершён")
+
+# Сценарий C: Батарея разряжена
+print("\n СЦЕНАРИЙ C: Батарея разряжена")
+result_C = run_preflight_simulation("Scenario C", gps_delay_sec=3.0, battery_low=True)
+if result_C['total_time']:
+    print(f" Взлёт разрешён. Полное время: {result_C['total_time']:.2f} с")
+else:
+    print(" Взлёт ЗАПРЕЩЁН (батарея разряжена)")
+    if result_C['abort_time']:
+        print(f"   Переход в STATE_ABORT на t={result_C['abort_time']:.2f} с")
+
+# ============================================
+# ПОСТРОЕНИЕ ГРАФИКОВ
+# ============================================
+
+fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+
+# Функция для построения графика одного сценария
+def plot_scenario(ax, result, title, color_event=None):
+    t = result['t']
+    
+    # Состояние FSM
+    ax.plot(t, result['state'], 'b-', linewidth=2, label='FSM State', drawstyle='steps-post')
+    
+    # Статус проверок (смещённые для наглядности)
+    ax.plot(t, [x + 7 for x in result['imu']], 'g-', linewidth=1.5, label='IMU OK', alpha=0.7)
+    ax.plot(t, [x + 8 for x in result['gps']], 'orange', linewidth=1.5, label='GPS Fix', alpha=0.7)
+    ax.plot(t, [x + 9 for x in result['battery']], 'r-', linewidth=1.5, label='Battery OK', alpha=0.7)
+    ax.plot(t, [x + 10 for x in result['lidar']], 'purple', linewidth=1.5, label='Lidar OK', alpha=0.7)
+    
+    # Маркеры состояний
+    ax.set_yticks([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    ax.set_yticklabels(['IDLE', 'ARM', 'PREFLIGHT', 'THR↑', 'CLIMB', 'DONE', 'ABORT', 
+                        'IMU', 'GPS', 'BAT', 'LIDAR'])
+    
+    # Вертикальная линия для события
+    if color_event:
+        ax.axvline(x=color_event['time'], color=color_event['color'], 
+                   linestyle=':', linewidth=2, alpha=0.7, label=color_event['label'])
+    
+    ax.set_title(title, fontsize=11, fontweight='bold')
+    ax.set_ylabel('Состояние / Проверки')
+    ax.legend(loc='upper left', fontsize=8)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([-0.5, 10.5])
+
+# Сценарий A
+plot_scenario(axes[0], result_A, 
+              'Сценарий A: Все проверки пройдены (GPS = 3 с)',
+              {'time': 3.0, 'color': 'green', 'label': 'GPS Fix (3 с)'})
+
+# Сценарий B
+plot_scenario(axes[1], result_B,
+              'Сценарий B: GPS задержка 20 с',
+              {'time': 20.0, 'color': 'orange', 'label': 'GPS Fix (20 с)'})
+
+# Сценарий C
+plot_scenario(axes[2], result_C,
+              'Сценарий C: Батарея разряжена',
+              {'time': result_C['abort_time'] if result_C['abort_time'] else 2.1, 
+               'color': 'red', 'label': 'ABORT (батарея)'})
+
+axes[2].set_xlabel('Время, с')
+
+plt.tight_layout()
+plt.savefig('preflight_scenarios.png', dpi=150, bbox_inches='tight')
+print("\n График сохранён как 'preflight_scenarios.png'")
+plt.show()
+
+# ============================================
+# ИТОГОВАЯ ТАБЛИЦА
+# ============================================
+
+print("\n" + "=" * 70)
+print("ИТОГОВЫЕ РЕЗУЛЬТАТЫ:")
+print("=" * 70)
+print(f"Сценарий A (Всё ок):     {'Взлёт за ' + f'{result_A[\"total_time\"]:.2f}' + ' с' if result_A['total_time'] else 'Взлёт запрещён'}")
+print(f"Сценарий B (GPS 20 с):   {'Взлёт за ' + f'{result_B[\"total_time\"]:.2f}' + ' с' if result_B['total_time'] else 'Взлёт запрещён'}")
+print(f"Сценарий C (Батарея):    {'Взлёт за ' + f'{result_C[\"total_time\"]:.2f}' + ' с' if result_C['total_time'] else 'Взлёт ЗАПРЕЩЁН ❌'}")
+print("=" * 70)
+```
+
+
+**1.Логика программы**  
+Функция `run_preflight_checks()` - выполняет 4 проверки и возвращает структуру с результатами.  
+**Проверка 1: IMU**  
+```python
+s.imu_ok = (abs(angle_roll) < 5.0 && abs(angle_pitch) < 5.0);
+```
+
+- Дрон должен стоять горизонтально (крен и тангаж < 5°)
+- Если дрон наклонён → взлёт опасен (может перевернуться)
+
+
+**Проверка 2: GPS**  
+```python
+s.gps_fix = (gps_fix_type >= 3);  // 3D fix
+```
+
+- `gps_fix_type = 3` означает 3D-фикс (минимум 4 спутника)
+- Без GPS функция возврата (RTL) недоступна
+
+
+**Проверка 3: Батарея**  
+```python
+s.battery_ok = (battery_voltage > 1050);  // > 10.5 В
+```
+
+- Для 3S LiPo батареи минимум = 3 × 3.5 В = 10.5 В
+- `battery_voltage` хранится в единицах 0.01 В × 100
+- Если батарея разряжена → взлёт запрещён
+
+**Проверка 4: Лидар**  
+```python
+s.lidar_ok = (lidar_distance != 0xFFFF && lidar_distance > 0);
+```
+
+- `0xFFFF` ошибка датчика (нет ответа)
+- `0` = нет данных
+- Если лидар не работает → невозможно определить отрыв и посадку
+
+
+Итоговая проверка:  
+```python
+s.all_ok = s.imu_ok && s.gps_fix && s.battery_ok && s.lidar_ok;
+```
+
+
+**Интеграция в FSM (Case 2: STATE_PREFLIGHT)**  
+Что изменилось:  
+- Состояние переименовано из `STATE_WAIT_GPS` в `STATE_PREFLIGHT`
+- Теперь проверяются все датчики, а не только GPS
+
+
+**Батарея:**   
+```python
+if (!pf.battery_ok) {
+    takeoff_state = 0;  // Возврат в IDLE
+    disarm_motors();     // Дизарминг
+    error_code = ERROR_BATTERY_LOW;
+}
+```
+- Если батарея разряжена → немедленный возврат в состояние ожидания
+- Моторы отключаются для безопасности
+- Взлёт невозможен до замены батареи
 
 
 
+**Таймаут GPS (60 с):**   
+```python
+if (preflight_timer > 15000) {  // 15000 × 4 мс = 60 с
+    if (!gps_fix) {
+        takeoff_state = 3;  // Взлетаем без GPS
+        warning_code = WARNING_NO_GPS;
+    }
+}
+```
+- Если GPS не пришёл за 60 с → взлёт разрешён, но без функции RTL
+- Это компромисс: лучше взлететь без GPS, чем ждать бесконечно
+- Взлёт невозможен до замены батареи
 
+
+
+**Индикация ошибок через LED**   
+```python
+void blink_error_code(int code) {
+    for (int i = 0; i < code; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(200);
+        digitalWrite(LED_PIN, LOW);
+        delay(200);
+    }
+    delay(500);  // Пауза между кодами
+}
+```
+- 1 мигание = ошибка IMU
+- 2 мигания = нет GPS
+- 3 мигания = батарея разряжена
+- 4 мигания = ошибка лидара
+
+
+
+**Python-симуляция: три сценария**  
+**Сценарий A: Всё исправно**   
+```python
+result_A = run_preflight_simulation("Scenario A", gps_delay_sec=3.0, battery_low=False)
+```
+Что происходит:  
+- t = 0.1 с: переход в ARM
+- t = 2.1 с: переход в PREFLIGHT
+- t = 3.0 с: GPS получен → все проверки пройдены
+- t = 3.0 с: переход в THROTTLE_UP
+- t ≈ 11.4 с: взлёт завершён
+
+
+Результат: Взлёт разрешён, время ~11.4 с
+
+
+
+**Сценарий B: GPS задерживается на 20 с**   
+```python
+result_B = run_preflight_simulation("Scenario B", gps_delay_sec=20.0, battery_low=False)
+```
+Что происходит:  
+- t = 0.1 с: переход в ARM
+- t = 2.1 с: переход в PREFLIGHT
+- t = 3.0 с: GPS получен → все проверки пройдены
+  - Все остальные проверки пройдены
+  - Ждём GPS-фикс
+- t = 20.0 с: GPS получен → все проверки пройдены
+- t = 20.0 с: переход в THROTTLE_UP
+- t ≈ 29.4 с: взлёт завершён
+
+
+Результат: Взлёт разрешён, время ~29.4 с (на 18 с дольше)  
+
+
+**Сценарий C: Батарея разряжена**   
+```python
+result_C = run_preflight_simulation("Scenario C", gps_delay_sec=3.0, battery_low=True)
+```
+Что происходит:  
+- t = 0.1 с: переход в ARM
+- t = 2.1 с: переход в PREFLIGHT
+- t = 2.1 с: выполняются проверки
+  - imu_ok = True
+  - gps_fix = False
+  - battery_ok = False
+  - lidar_ok = True
+  - all_ok = False
+- t = 2.1 с: обнаружена критическая ошибка (батарея)
+- t = 2.1 с: переход в STATE_ABORT
+- t = 2.1 с: дизарминг, возврат в IDLE
+
+
+Результат: Взлёт запрещён (батарея разряжена)  
+
+
+![Графики](3.1.png)  
+![Графики](3.2.png)  
+
+
+Верхний график (Сценарий A):  
+- Синяя линия: состояние FSM (0 → 1 → 2 → 3 → 4 → 5)
+- Зелёная линия (IMU): всегда 1 (исправен)
+- Оранжевая линия (GPS): 0 до 3 с, потом 1
+- Красная линия (батарея): всегда 1 (заряжена)
+- Фиолетовая линия (лидар): всегда 1 (исправен)
+
+
+
+Средний график (Сценарий B):  
+- Длинное плато состояния PREFLIGHT (2.1–20.0 с)
+- Оранжевая линия (GPS) переключается на 1 только на 20 с
+- Оранжевая линия (GPS): 0 до 3 с, потом 1
+- После 20 с → быстрый переход к взлёту
+
+
+Нижний график (Сценарий C):  
+- Красная линия (батарея) = 0 (разряжена)
+- На 2.1 с состояние переходит в ABORT (6)
+- Дальше ничего не происходит — взлёт заблокирован
 
 
 
